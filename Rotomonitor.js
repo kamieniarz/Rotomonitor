@@ -20,6 +20,7 @@ const warningTime = config.warningTime * 60000;
 const offlineTime = config.offlineTime * 60000;
 const reopenTime = config.reopenTime * 60000;
 const rebootTime = config.rebootAgainTimer * 60000;
+const reclickTime = config.clickAgainTimer * 60000;
 const reapplySAMTime = config.reapplySAMTime * 60000;
 const okColor = 0x008000;
 const warningColor = 0xFFFF00;
@@ -32,6 +33,7 @@ const WEBSITE_AUTH = {
     },
     'jar': true
 };
+const axios = require('axios');
 var postingDelay = config.postingDelay * 60000;
 var devices = {};
 var okDeviceMessage = "";
@@ -213,7 +215,11 @@ bot.on('messageCreate', async message => {
 
         if(command === "reboot") {
             // Reboot a specific device
-            RebootWarnDevice(manDevices);
+            RebootOfflineDevice(manDevices);
+        }
+        else if(command === "reclick") {
+            // Click a specific device
+            ClickWarnedDevice(manDevices);
         }
         else if(command === "reopen") {
             // Reopen a game for a specific device
@@ -344,11 +350,15 @@ function CreateDB() {
                     lastSeen INTEGER, 
                     alerted INTEGER, 
                     rebooted INTEGER, 
+                    clicked INTEGER, 
                     reopened INTEGER, 
                     reapplied INTEGER, 
                     rebooted_time INTEGER, 
+                    clicked_time INTEGER, 
                     retry_reboot INTEGER, 
-                    reboots INTEGER)`, 
+                    retry_click INTEGER, 
+                    reboots INTEGER, 
+                    clicks INTEGER)`, 
                 (err) => {
             if(err) {
                 console.error(err.message);
@@ -378,11 +388,15 @@ function ReadDB() {
                     "lastSeen": rows[rowNumber].lastSeen,
                     "alerted": Boolean(rows[rowNumber].alerted),
                     "rebooted": Boolean(rows[rowNumber].rebooted),
+                    "clicked": Boolean(rows[rowNumber].clicked),
                     "reopened": Boolean(rows[rowNumber].reopened),
                     "reapplied": Boolean(rows[rowNumber].reapplied),
                     "rebooted_time": rows[rowNumber].rebooted_time,
+                    "clicked_time": rows[rowNumber].clicked_time,
                     "retry_reboot": Boolean(rows[rowNumber].retry_reboot),
-                    "reboots": rows[rowNumber].reboots
+                    "retry_click": Boolean(rows[rowNumber].retry_click),
+                    "reboots": rows[rowNumber].reboots,
+                    "clicks": rows[rowNumber].clicks
                 };
             }
             return resolve();
@@ -397,22 +411,30 @@ function InsertDB(device) {
                 lastSeen, 
                 alerted, 
                 rebooted, 
+                clicked, 
                 reopened, 
                 reapplied, 
                 rebooted_time, 
+                clicked_time, 
                 retry_reboot, 
-                reboots) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                retry_click, 
+                reboots, 
+                clicks) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 device.name, 
                 device.lastSeen, 
                 device.alerted, 
                 device.rebooted, 
+                device.clicked, 
                 device.reopened, 
                 device.reapplied, 
                 device.rebooted_time, 
+                device.clicked_time, 
                 device.retry_reboot, 
-                device.reboots
+                device.retry_click, 
+                device.reboots,
+                device.clicks
             ], (err) => {
             if(err) {
                 console.error(err.message);
@@ -471,11 +493,15 @@ async function AddDevice(name, device) {
         "lastSeen": Math.trunc(device.worker.dateLastMessageReceived / 1000),
         "alerted": false,
         "rebooted": false,
+        "clicked": false,
         "reopened": false,
         "reapplied": false,
         "rebooted_time": 0,
+        "clicked_time": 0,
         "retry_reboot": false,
-        "reboots": 0
+        "retry_click": false,
+        "reboots": 0,
+        "clicks": 0
     };
     if(!devices[name].lastSeen) {
         devices[name].lastSeen = "Never"
@@ -503,7 +529,8 @@ async function PostStatus() {
     await SendOfflineDeviceDMs();
     await ReopenWarnGame();
     await ReapplySAM();
-    await RebootWarnDevice();
+    await ClickWarnedDevice();
+    await RebootOfflineDevice();
 }
 
 async function PostGroupedDevices() {
@@ -546,11 +573,11 @@ async function PostGroupedDevices() {
             if(offlineDevices.length == 0) {
                 offlineDevices.push("None")
             }
-            PostDeviceGroup(okDevices.sort(), okColor, okImage, 'Working Devices: ' + okDevicesCount, okDeviceMessage).then(posted => {
+            PostDeviceGroup(okDevices.sort(), okColor, okImage, 'Working Workers: ' + okDevicesCount, okDeviceMessage).then(posted => {
                 okDeviceMessage = posted.id;
-                PostDeviceGroup(warnDevices.sort(), warningColor, warningImage, 'Warned Devices: ' + warnDevicesCount, warnDeviceMessage).then(posted => {
+                PostDeviceGroup(warnDevices.sort(), warningColor, warningImage, 'Warned Workers (' + config.warningTime + 'm): ' + warnDevicesCount, warnDeviceMessage).then(posted => {
                     warnDeviceMessage = posted.id;
-                    PostDeviceGroup(offlineDevices.sort(), offlineColor, offlineImage, 'Offline Devices: ' + offlineDevicesCount, offlineDeviceMessage).then(posted => {
+                    PostDeviceGroup(offlineDevices.sort(), offlineColor, offlineImage, 'Offline Workers (' + config.offlineTime + 'm): ' + offlineDevicesCount, offlineDeviceMessage).then(posted => {
                         offlineDeviceMessage = posted.id;
                         offlineDeviceList = offlineDevices;
                         PostLastUpdated();
@@ -762,8 +789,8 @@ function ReapplySAM(manDevices) {
     setTimeout(ReapplySAM, 60000);
 }
 
-function RebootWarnDevice(manDevices) {
-    if(!config.allowWarnReboots && !manDevices) {
+function ClickWarnedDevice(manDevices) {
+    if(!config.allowClickWarned && !manDevices) {
         return;
     }
     // If there's no device data, we may have gotten here too fast
@@ -783,41 +810,36 @@ function RebootWarnDevice(manDevices) {
             lastSeen.setUTCSeconds(device.lastSeen);
             lastSeen = lastSeen.getTime();
             lastSeen = now - lastSeen;
-            if(lastSeen > warningTime) {
+            if(lastSeen > warningTime && lastSeen <= offlineTime) {
                 if(!config.excludeFromReboots.includes(deviceName.slice(0, -4))) {
                     warnedDevices.push(deviceName);
-                    if(devices[deviceName].rebooted && devices[deviceName].reboots < config.maxRebootRetries && Date.now() - devices[deviceName].rebooted_time > rebootTime ) {
-                        devices[deviceName].retry_reboot = true;
+                    if(devices[deviceName].clicked && devices[deviceName].clicks < config.maxClickRetries && Date.now() - devices[deviceName].clicked_time > reclickTime ) {
+                        devices[deviceName].retry_click = true;
                     }
                 }
             }
         }
     }
     for(var i = 0; i < warnedDevices.length; i++) {
-        if(!devices[warnedDevices[i]].rebooted || manDevices || devices[warnedDevices[i]].retry_reboot) {
-            for(var ii = 0; ii < config.rebootMonitorURL.length; ii++) {
-                const options = {
-                    url: config.rebootMonitorURL[ii],
-                    json: true,
-                    method: 'POST',
-                    body: {
-                        'type': 'restart',
-                        'device': devices[warnedDevices[i]].name.slice(0, -4)
+        if(!devices[warnedDevices[i]].clicked || manDevices || devices[warnedDevices[i]].retry_click) {
+            for(var ii = 0; ii < config.MAD_URL.length; ii++) {
+                const reclickEndpoint = `${config.MAD_URL}/install_file?jobname=Click&origin=${encodeURIComponent(devices[warnedDevices[i]].name.slice(0, -4))}&adb=False&type=JobType.CHAIN`;
+                console.info(GetTimestamp() + `Sending click request for ${devices[warnedDevices[i]].name} to remote listener ${reclickEndpoint}`);
+                if (manDevices) { bot.channels.cache.get(config.channel).send(`Sending click request for ${devices[warnedDevices[i]].name} to remote listener`); }
+                axios.get(reclickEndpoint, {
+                    auth: {
+                        username: config.MAD_LOGIN,
+                        password: config.MAD_PASS
                     },
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                };
-                console.info(GetTimestamp() + `Sending reboot request for ${devices[warnedDevices[i]].name} to remote listener ${config.rebootMonitorURL[ii]}`);
-                if (manDevices) { bot.channels.cache.get(config.channel).send(`Sending reboot request for ${devices[warnedDevices[i]].name} to remote listener`); }
-                request(options, (err, res, body) => {
-                    if(err) {
-                        console.error(GetTimestamp() + `Failed to send reboot request to remote listener for ${options.body.device}`);
-                        if (manDevices) { bot.channels.cache.get(config.channel).send(`Failed to send reboot request to remote listener for ${options.body.device}`); }
+                }).then(response => {
+                    // Handle successful response if needed
+                }).catch(error => {
+                    console.error(GetTimestamp() + `Failed to send click request to remote listener for ${devices[warnedDevices[i]].name}`);
+                    if (manDevices) {
+                        bot.channels.cache.get(config.channel).send(`Failed to send click request to remote listener for ${devices[warnedDevices[i]].name}`);
                     }
                 });
-                SendRebootAlert(devices[warnedDevices[i]].name);
+                SendClickAlert(devices[warnedDevices[i]].name);
                 // Update all workers with the same parent device
                 for(var deviceName in devices) {
                     if(warnedDevices.indexOf(deviceName) == -1) {
@@ -826,10 +848,10 @@ function RebootWarnDevice(manDevices) {
                     if(devices[deviceName].parent != devices[warnedDevices[i]].parent) {
                         continue;
                     }
-                    devices[deviceName].rebooted = true;
-                    devices[deviceName].rebooted_time = Date.now();
-                    devices[deviceName].retry_reboot = false;
-                    devices[deviceName].reboots = devices[deviceName].reboots + 1;
+                    devices[deviceName].clicked = true;
+                    devices[deviceName].clicked_time = Date.now();
+                    devices[deviceName].retry_click = false;
+                    devices[deviceName].clicks = devices[deviceName].clicks + 1;
                 }
             }
         }
@@ -844,7 +866,96 @@ function RebootWarnDevice(manDevices) {
                 // Remove the sam tracker since it is out of that timeframe now.
                 devices[deviceName].reapplied = false;
             }
-            if(devices[deviceName].rebooted && warnedDevices.indexOf(deviceName) == -1) {
+            if(devices[deviceName].clicked && warnedDevices.indexOf(deviceName) == -1) {
+                devices[deviceName].clicked = false;
+                devices[deviceName].clicked_time = 0;
+                devices[deviceName].retry_click = false;
+                devices[deviceName].clicks = 0;
+                console.info(GetTimestamp() + `Device ${devices[deviceName].name} has come back online from clicking the device`);
+            }
+        }
+    }
+    setTimeout(ClickWarnedDevice, 60000);
+}
+
+function RebootOfflineDevice(manDevices) {
+    if(!config.allowOfflineReboots && !manDevices) {
+        return;
+    }
+    // If there's no device data, we may have gotten here too fast
+    if (devices.length < 1) {
+        return;
+    }
+    let now = new Date();
+    now = now.getTime();
+    let offlineDevices = [];
+    if (manDevices) {
+        offlineDevices = manDevices;
+    }
+    else {
+        for(var deviceName in devices) {
+            let device = devices[deviceName];
+            let lastSeen = new Date(0);
+            lastSeen.setUTCSeconds(device.lastSeen);
+            lastSeen = lastSeen.getTime();
+            lastSeen = now - lastSeen;
+            if(lastSeen > offlineTime) {
+                if(!config.excludeFromReboots.includes(deviceName.slice(0, -4))) {
+                    offlineDevices.push(deviceName);
+                    if(devices[deviceName].rebooted && devices[deviceName].reboots < config.maxRebootRetries && Date.now() - devices[deviceName].rebooted_time > rebootTime ) {
+                        devices[deviceName].retry_reboot = true;
+                    }
+                }
+            }
+        }
+    }
+    for(var i = 0; i < offlineDevices.length; i++) {
+        if(!devices[offlineDevices[i]].rebooted || manDevices || devices[offlineDevices[i]].retry_reboot) {
+            for(var ii = 0; ii < config.MAD_URL.length; ii++) {
+                const rebootEndpoint = `${config.MAD_URL}/install_file?jobname=Reboot-Device&origin=${encodeURIComponent(devices[offlineDevices[i]].name.slice(0, -4))}&adb=False&type=JobType.CHAIN`;
+                console.info(GetTimestamp() + `Sending reboot request for ${devices[offlineDevices[i]].name} to remote listener ${rebootEndpoint}`);
+                if (manDevices) { bot.channels.cache.get(config.channel).send(`Sending reboot request for ${devices[offlineDevices[i]].name} to remote listener`); }
+                axios.get(rebootEndpoint, {
+                    auth: {
+                        username: config.MAD_LOGIN,
+                        password: config.MAD_PASS
+                    },
+                }).then(response => {
+                    // Handle successful response if needed
+                }).catch(error => {
+                    console.error(GetTimestamp() + `Failed to send reboot request to remote listener for ${devices[offlineDevices[i]].name}`);
+                    if (manDevices) {
+                        bot.channels.cache.get(config.channel).send(`Failed to send reboot request to remote listener for ${devices[offlineDevices[i]].name}`);
+                    }
+                });
+                SendRebootAlert(devices[offlineDevices[i]].name);
+                // Update all workers with the same parent device
+                for(var deviceName in devices) {
+                    if(offlineDevices.indexOf(deviceName) == -1) {
+                        continue;
+                    }
+                    if(devices[deviceName].parent != devices[offlineDevices[i]].parent) {
+                        continue;
+                    }
+                    devices[deviceName].rebooted = true;
+                    devices[deviceName].rebooted_time = Date.now();
+                    devices[deviceName].retry_reboot = false;
+                    devices[deviceName].reboots = devices[deviceName].reboots + 1;
+                }
+            }
+        }
+    }
+    if (!manDevices) { // Only remove tracking if this wasn't a manual request
+        for(var deviceName in devices) {
+            if(devices[deviceName].reopened && offlineDevices.indexOf(deviceName) != -1) {
+                // Remove the reopen tracker since it is out of that timeframe now.
+                devices[deviceName].reopened = false;
+            }
+            if(devices[deviceName].reapplied && offlineDevices.indexOf(deviceName) != -1) {
+                // Remove the sam tracker since it is out of that timeframe now.
+                devices[deviceName].reapplied = false;
+            }
+            if(devices[deviceName].rebooted && offlineDevices.indexOf(deviceName) == -1) {
                 devices[deviceName].rebooted = false;
                 devices[deviceName].rebooted_time = 0;
                 devices[deviceName].retry_reboot = false;
@@ -853,7 +964,7 @@ function RebootWarnDevice(manDevices) {
             }
         }
     }
-    setTimeout(RebootWarnDevice, 60000);
+    setTimeout(RebootOfflineDevice, 60000);
 }
 
 function ChangeBrightness(manDevices, brightInt) {
@@ -911,6 +1022,24 @@ async function SendRebootAlert(device) {
         }
         else {
             user.send(GetTimestamp() + " Device: " + device + " was sent the reboot command").catch(error => {
+                console.error(GetTimestamp() + "Failed to send a DM to user: " + user.id);
+                return;
+            });
+        }
+    }
+}
+
+async function SendClickAlert(device) {
+    if(!config.sendClickAlerts) {
+        return;
+    }
+    for(var i = 0; i < config.userAlerts.length; i++) {
+        let user = await bot.users.fetch(config.userAlerts[i]);
+        if(!user) {
+            console.error(GetTimestamp() + "Cannot find a user to DM with ID: " + config.userAlerts[i]);
+        }
+        else {
+            user.send(GetTimestamp() + " Device: " + device + " was sent the click command").catch(error => {
                 console.error(GetTimestamp() + "Failed to send a DM to user: " + user.id);
                 return;
             });
