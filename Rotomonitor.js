@@ -346,7 +346,7 @@ function UpdateDevices() {
             }
             data.workers.forEach(async function(worker) {
                 var name = "";
-                if (worker.worker.origin.includes("Aegis")) {
+                if (worker.worker.origin.includes("Aegis") || worker.worker.origin.includes("cosmog")) {
                     let idnum = worker.worker.workerId.split(/[-]+/).pop();
                     name = worker.worker.deviceId + "_" + idnum.toString().padStart(3, '0');
                     worker.worker.origin = worker.worker.deviceId;
